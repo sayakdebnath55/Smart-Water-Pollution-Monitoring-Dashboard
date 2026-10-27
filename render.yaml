@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: aquaguard-water-monitoring
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: DEMO_MODE
+        value: true
+      - key: SIMULATION_ENABLED
+        value: true
+      - key: DB_PATH
+        value: ./server/data/aquaguard.sqlite

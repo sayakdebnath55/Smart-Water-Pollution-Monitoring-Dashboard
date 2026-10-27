@@ -12,9 +12,15 @@ import { ReportsPage } from './pages/ReportsPage';
 import { SettingsPage } from './pages/SettingsPage';
 
 export const App: React.FC = () => {
+  const basename = window.location.pathname.startsWith(
+    '/Smart-Water-Pollution-Monitoring-Dashboard'
+  )
+    ? '/Smart-Water-Pollution-Monitoring-Dashboard'
+    : '/';
+
   return (
     <AppProvider>
-      <BrowserRouter>
+      <BrowserRouter basename={basename}>
         <Routes>
           <Route path="/" element={<AppLayout />}>
             <Route index element={<OverviewPage />} />

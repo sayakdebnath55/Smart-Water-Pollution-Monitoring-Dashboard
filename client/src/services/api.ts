@@ -10,8 +10,11 @@ import {
   TimeRangeOption,
   UserSession,
 } from '../types/index';
+import { browserDemoEngine } from './browserDemoEngine';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
+
+let useBrowserFallback = false;
 
 function getAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
@@ -30,49 +33,99 @@ function getAuthHeaders(): Record<string, string> {
   return headers;
 }
 
-async function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      ...getAuthHeaders(),
-      ...(options.headers || {}),
-    },
-  });
-
-  if (!res.ok) {
-    let errorMessage = `Request failed with status ${res.status}`;
-    try {
-      const errBody = await res.json();
-      if (errBody && errBody.error) {
-        errorMessage = errBody.error;
-      }
-    } catch {
-      // ignore json parse failure
-    }
-    throw new Error(errorMessage);
+async function requestJson<T>(
+  path: string,
+  options: RequestInit = {},
+  fallbackFn?: () => T | Promise<T>
+): Promise<T> {
+  if (useBrowserFallback && fallbackFn) {
+    return fallbackFn();
   }
 
-  return res.json() as Promise<T>;
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: {
+        ...getAuthHeaders(),
+        ...(options.headers || {}),
+      },
+    });
+
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      // Static host (e.g., GitHub Pages) returned HTML 404 instead of JSON API
+      if (fallbackFn) {
+        useBrowserFallback = true;
+        return fallbackFn();
+      }
+    }
+
+    if (!res.ok) {
+      let errorMessage = `Request failed with status ${res.status}`;
+      try {
+        const errBody = await res.json();
+        if (errBody && errBody.error) {
+          errorMessage = errBody.error;
+        }
+      } catch {
+        // ignore json parse failure
+      }
+      throw new Error(errorMessage);
+    }
+
+    return res.json() as Promise<T>;
+  } catch (err: any) {
+    // If network/fetch failed (e.g., static deployment without backend server), activate browser engine
+    if (
+      fallbackFn &&
+      (useBrowserFallback ||
+        err instanceof TypeError ||
+        String(err?.message || '').includes('Failed to fetch') ||
+        String(err?.message || '').includes('status 404'))
+    ) {
+      useBrowserFallback = true;
+      return fallbackFn();
+    }
+    throw err;
+  }
 }
 
 export const api = {
   // Dashboard
-  getDashboardSummary: () => requestJson<DashboardSummaryResponse>('/dashboard/summary'),
+  getDashboardSummary: () =>
+    requestJson<DashboardSummaryResponse>('/dashboard/summary', {}, () =>
+      browserDemoEngine.getDashboardSummary()
+    ),
 
   // Auth & Role
   login: (identifier: string, password: string) =>
-    requestJson<{ user: UserSession; token: string }>('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ username: identifier, password }),
-    }),
+    requestJson<{ user: UserSession; token: string }>(
+      '/auth/login',
+      {
+        method: 'POST',
+        body: JSON.stringify({ username: identifier, password }),
+      },
+      () =>
+        browserDemoEngine.switchDemoRole(
+          identifier.toLowerCase().includes('operator') ? 'operator' : 'admin'
+        )
+    ),
 
   switchDemoRole: (role: 'admin' | 'operator') =>
-    requestJson<{ user: UserSession; token: string }>('/auth/switch-role', {
-      method: 'POST',
-      body: JSON.stringify({ role }),
-    }),
+    requestJson<{ user: UserSession; token: string }>(
+      '/auth/switch-role',
+      {
+        method: 'POST',
+        body: JSON.stringify({ role }),
+      },
+      () => browserDemoEngine.switchDemoRole(role)
+    ),
 
-  getMe: () => requestJson<{ user: UserSession | null; demoMode: boolean }>('/auth/me'),
+  getMe: () =>
+    requestJson<{ user: UserSession | null; demoMode: boolean }>('/auth/me', {}, () => ({
+      user: browserDemoEngine.switchDemoRole('admin').user,
+      demoMode: true,
+    })),
 
   // Stations
   getStations: (params?: {
@@ -89,7 +142,11 @@ export const api = {
     if (params?.sortBy) q.set('sortBy', params.sortBy);
     if (params?.sortDir) q.set('sortDir', params.sortDir);
     const qs = q.toString();
-    return requestJson<{ stations: Station[]; total: number }>(`/stations${qs ? `?${qs}` : ''}`);
+    return requestJson<{ stations: Station[]; total: number }>(
+      `/stations${qs ? `?${qs}` : ''}`,
+      {},
+      () => browserDemoEngine.getStations(params)
+    );
   },
 
   getStationById: (id: string) =>
@@ -97,24 +154,36 @@ export const api = {
       station: Station;
       alerts: AlertItem[];
       thresholds: ThresholdRule[];
-    }>(`/stations/${encodeURIComponent(id)}`),
+    }>(`/stations/${encodeURIComponent(id)}`, {}, () => browserDemoEngine.getStationById(id)),
 
   createStation: (payload: Record<string, unknown>) =>
-    requestJson<{ station: Station }>('/stations', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
+    requestJson<{ station: Station }>(
+      '/stations',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      () => browserDemoEngine.createStation(payload)
+    ),
 
   updateStation: (id: string, payload: Record<string, unknown>) =>
-    requestJson<{ station: Station }>(`/stations/${encodeURIComponent(id)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    }),
+    requestJson<{ station: Station }>(
+      `/stations/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      },
+      () => browserDemoEngine.updateStation(id, payload)
+    ),
 
   deleteStation: (id: string) =>
-    requestJson<{ deleted: boolean; id: string }>(`/stations/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-    }),
+    requestJson<{ deleted: boolean; id: string }>(
+      `/stations/${encodeURIComponent(id)}`,
+      {
+        method: 'DELETE',
+      },
+      () => browserDemoEngine.deleteStation(id)
+    ),
 
   // Readings
   getReadings: (params?: {
@@ -140,7 +209,7 @@ export const api = {
       series: SensorReading[];
       total: number;
       timeBounds: { startIso: string; endIso: string; label: string };
-    }>(`/readings${qs ? `?${qs}` : ''}`);
+    }>(`/readings${qs ? `?${qs}` : ''}`, {}, () => browserDemoEngine.getReadings(params));
   },
 
   ingestReading: (payload: {
@@ -156,10 +225,14 @@ export const api = {
       reading: SensorReading;
       alert?: AlertItem | null;
       isNewAlert?: boolean;
-    }>('/readings', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
+    }>(
+      '/readings',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      () => browserDemoEngine.ingestReading(payload)
+    ),
 
   // Alerts
   getAlerts: (params?: {
@@ -190,12 +263,14 @@ export const api = {
       unreadCount: number;
       activeCriticalCount: number;
       activeWarningCount: number;
-    }>(`/alerts${qs ? `?${qs}` : ''}`);
+    }>(`/alerts${qs ? `?${qs}` : ''}`, {}, () => browserDemoEngine.getAlerts(params));
   },
 
   getAlertDetails: (id: string) =>
     requestJson<{ alert: AlertItem; events: AlertEventItem[] }>(
-      `/alerts/${encodeURIComponent(id)}`
+      `/alerts/${encodeURIComponent(id)}`,
+      {},
+      () => browserDemoEngine.getAlertDetails(id)
     ),
 
   acknowledgeAlert: (id: string, notes?: string) =>
@@ -204,7 +279,8 @@ export const api = {
       {
         method: 'POST',
         body: JSON.stringify({ notes }),
-      }
+      },
+      () => browserDemoEngine.acknowledgeAlert(id, notes)
     ),
 
   resolveAlert: (id: string, resolutionNotes?: string) =>
@@ -213,7 +289,8 @@ export const api = {
       {
         method: 'POST',
         body: JSON.stringify({ resolution_notes: resolutionNotes }),
-      }
+      },
+      () => browserDemoEngine.resolveAlert(id, resolutionNotes)
     ),
 
   reopenAlert: (id: string, notes?: string) =>
@@ -222,31 +299,46 @@ export const api = {
       {
         method: 'POST',
         body: JSON.stringify({ notes }),
-      }
+      },
+      () => browserDemoEngine.reopenAlert(id, notes)
     ),
 
   markAllAlertsRead: () =>
-    requestJson<{ updatedCount: number }>('/alerts/mark-all-read', {
-      method: 'POST',
-    }),
+    requestJson<{ updatedCount: number }>(
+      '/alerts/mark-all-read',
+      {
+        method: 'POST',
+      },
+      () => browserDemoEngine.markAllAlertsRead()
+    ),
 
   // Thresholds
   getThresholds: (stationId?: string) => {
     const qs = stationId ? `?stationId=${encodeURIComponent(stationId)}` : '';
-    return requestJson<{ thresholds: ThresholdRule[] }>(`/thresholds${qs}`);
+    return requestJson<{ thresholds: ThresholdRule[] }>(`/thresholds${qs}`, {}, () =>
+      browserDemoEngine.getThresholds(stationId)
+    );
   },
 
   updateThreshold: (id: number, payload: Partial<ThresholdRule>) =>
-    requestJson<{ threshold: ThresholdRule }>(`/thresholds/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(payload),
-    }),
+    requestJson<{ threshold: ThresholdRule }>(
+      `/thresholds/${id}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      },
+      () => browserDemoEngine.updateThreshold(id, payload)
+    ),
 
   upsertStationThreshold: (payload: Partial<ThresholdRule> & { parameter: ParameterCode }) =>
-    requestJson<{ threshold: ThresholdRule }>('/thresholds', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
+    requestJson<{ threshold: ThresholdRule }>(
+      '/thresholds',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      () => browserDemoEngine.upsertStationThreshold(payload)
+    ),
 
   // Analytics
   getAnalyticsSummary: (params?: {
@@ -265,7 +357,9 @@ export const api = {
     if (params?.endDate) q.set('endDate', params.endDate);
     if (params?.status) q.set('status', params.status);
     const qs = q.toString();
-    return requestJson<any>(`/analytics/summary${qs ? `?${qs}` : ''}`);
+    return requestJson<any>(`/analytics/summary${qs ? `?${qs}` : ''}`, {}, () =>
+      browserDemoEngine.getAnalyticsSummary(params)
+    );
   },
 
   // Reports
@@ -294,7 +388,9 @@ export const api = {
     }
     if (params.reportMode) q.set('reportMode', params.reportMode);
     if (params.title) q.set('title', params.title);
-    return requestJson<any>(`/reports/preview?${q.toString()}`);
+    return requestJson<any>(`/reports/preview?${q.toString()}`, {}, () =>
+      browserDemoEngine.getReportPreview(params)
+    );
   },
 
   downloadReportCsvUrl: (params: {
@@ -321,13 +417,20 @@ export const api = {
   },
 
   // Simulation & Settings
-  getSimulationStatus: () => requestJson<SimulationStatus>('/simulation/status'),
+  getSimulationStatus: () =>
+    requestJson<SimulationStatus>('/simulation/status', {}, () =>
+      browserDemoEngine.getDashboardSummary().simulation
+    ),
 
   toggleSimulation: (enabled?: boolean) =>
-    requestJson<SimulationStatus>('/simulation/toggle', {
-      method: 'POST',
-      body: JSON.stringify({ enabled }),
-    }),
+    requestJson<SimulationStatus>(
+      '/simulation/toggle',
+      {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      },
+      () => browserDemoEngine.toggleSimulation(enabled)
+    ),
 
   stepSimulation: (options?: {
     forceAnomaly?: boolean;
@@ -339,17 +442,21 @@ export const api = {
       newAlerts: AlertItem[];
       timestamp: string;
       simulation: SimulationStatus;
-    }>('/simulation/step', {
-      method: 'POST',
-      body: JSON.stringify(options || {}),
-    }),
+    }>(
+      '/simulation/step',
+      {
+        method: 'POST',
+        body: JSON.stringify(options || {}),
+      },
+      () => browserDemoEngine.stepSimulation(options)
+    ),
 
   getSettings: () =>
     requestJson<{
       settings: Record<string, any>;
       rawSettings: Array<{ key: string; value: string; description: string; updated_at: string }>;
       simulation: SimulationStatus;
-    }>('/settings'),
+    }>('/settings', {}, () => browserDemoEngine.getSettings()),
 
   updateSettings: (payload: Record<string, unknown>) =>
     requestJson<{ updated: boolean; simulation: SimulationStatus; settings: Record<string, any> }>(
@@ -357,11 +464,16 @@ export const api = {
       {
         method: 'PUT',
         body: JSON.stringify(payload),
-      }
+      },
+      () => browserDemoEngine.updateSettings(payload)
     ),
 
   resetDemoDatabase: () =>
-    requestJson<{ reset: boolean; message: string }>('/database/reset-demo', {
-      method: 'POST',
-    }),
+    requestJson<{ reset: boolean; message: string }>(
+      '/database/reset-demo',
+      {
+        method: 'POST',
+      },
+      () => browserDemoEngine.resetDemoDatabase()
+    ),
 };

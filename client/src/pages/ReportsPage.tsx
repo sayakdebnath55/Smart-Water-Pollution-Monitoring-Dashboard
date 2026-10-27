@@ -133,8 +133,75 @@ export const ReportsPage: React.FC = () => {
       });
 
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`Export failed with HTTP ${res.status}`);
-      const csvText = await res.text();
+      let csvText = '';
+      if (res.ok && (res.headers.get('content-type') || '').includes('text/csv')) {
+        csvText = await res.text();
+      } else if (reportData) {
+        // Fallback client-side RFC-4180 CSV generation for static hosts
+        const escapeCsv = (v: unknown) => {
+          const s = v === null || v === undefined ? '' : String(v);
+          return s.includes(',') || s.includes('"') || s.includes('\n')
+            ? `"${s.replace(/"/g, '""')}"`
+            : s;
+        };
+        if (type === 'readings') {
+          const header = [
+            'Reading ID',
+            'Timestamp',
+            'Station ID',
+            'Station Name',
+            'Parameter',
+            'Value',
+            'Unit',
+            'Quality Status',
+            'Data Source',
+          ].join(',');
+          const rows = (reportData.readings || []).map((r: any) =>
+            [
+              r.id,
+              r.recorded_at,
+              r.station_id,
+              r.station_name,
+              r.parameter,
+              r.value,
+              r.unit,
+              r.quality_status,
+              'DEMO DATA (SIMULATED)',
+            ]
+              .map(escapeCsv)
+              .join(',')
+          );
+          csvText = [header, ...rows].join('\r\n');
+        } else {
+          const header = [
+            'Alert ID',
+            'Created Timestamp',
+            'Severity',
+            'Station ID',
+            'Parameter',
+            'Measured Value',
+            'Triggered Threshold',
+            'Title',
+          ].join(',');
+          const rows = (reportData.alerts || []).map((a: any) =>
+            [
+              a.id,
+              a.created_at,
+              a.severity,
+              a.station_id,
+              a.parameter,
+              a.measured_value ?? '',
+              a.triggered_threshold,
+              a.title,
+            ]
+              .map(escapeCsv)
+              .join(',')
+          );
+          csvText = [header, ...rows].join('\r\n');
+        }
+      } else {
+        throw new Error(`Export failed with HTTP ${res.status}`);
+      }
       const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
       const downloadUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
